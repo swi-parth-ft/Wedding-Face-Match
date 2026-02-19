@@ -17,7 +17,6 @@ const state = {
   overlayParticles: [],
   overlayLastTs: 0,
   overlaySpawnAccumulatorMs: 0,
-  overlayAutoHideTimer: 0,
 };
 
 const els = {
@@ -32,7 +31,6 @@ const els = {
   results: document.getElementById("results"),
   selectAllBtn: document.getElementById("selectAllBtn"),
   downloadSelectedBtn: document.getElementById("downloadSelectedBtn"),
-  demoOverlayBtn: document.getElementById("demoOverlayBtn"),
   searchOverlay: document.getElementById("searchOverlay"),
   searchOverlayCanvas: document.getElementById("searchOverlayCanvas"),
   searchOverlayMessage: document.getElementById("searchOverlayMessage"),
@@ -62,9 +60,6 @@ function init() {
   els.searchBtn.addEventListener("click", onSearch);
   els.selectAllBtn.addEventListener("click", onToggleSelectAll);
   els.downloadSelectedBtn.addEventListener("click", onDownloadSelected);
-  if (els.demoOverlayBtn) {
-    els.demoOverlayBtn.addEventListener("click", onDemoOverlay);
-  }
   els.results.addEventListener("change", onResultsSelectionChanged);
 
   els.closeCameraBtn.addEventListener("click", closeCameraModal);
@@ -251,51 +246,28 @@ function setCapturedUiState(hasCapture) {
   els.usePhotoBtn.classList.toggle("hidden", !hasCapture);
 }
 
-function onDemoOverlay() {
-  showSearchOverlay("demo", 4200);
-}
-
-function showSearchOverlay(mode = "search", autoHideMs = 0) {
+function showSearchOverlay() {
   if (!els.searchOverlay) return;
 
-  clearOverlayAutoHideTimer();
   if (els.searchOverlayMessage) {
-    els.searchOverlayMessage.textContent =
-      mode === "search" ? "Searching your photos..." : "Fireworks Preview";
+    els.searchOverlayMessage.textContent = "Searching your photos...";
   }
   if (els.searchOverlaySubtext) {
-    els.searchOverlaySubtext.textContent =
-      mode === "search"
-        ? "Please wait while we find your matches."
-        : "This is how the live search celebration overlay looks.";
+    els.searchOverlaySubtext.textContent = "Please wait while we find your matches.";
   }
 
   els.searchOverlay.classList.remove("hidden");
   els.searchOverlay.setAttribute("aria-hidden", "false");
   document.body.classList.add("overlay-active");
   startOverlayAnimation();
-
-  if (autoHideMs > 0) {
-    state.overlayAutoHideTimer = window.setTimeout(() => {
-      hideSearchOverlay();
-    }, autoHideMs);
-  }
 }
 
 function hideSearchOverlay() {
-  clearOverlayAutoHideTimer();
   stopOverlayAnimation();
   if (!els.searchOverlay) return;
   els.searchOverlay.classList.add("hidden");
   els.searchOverlay.setAttribute("aria-hidden", "true");
   document.body.classList.remove("overlay-active");
-}
-
-function clearOverlayAutoHideTimer() {
-  if (state.overlayAutoHideTimer) {
-    clearTimeout(state.overlayAutoHideTimer);
-    state.overlayAutoHideTimer = 0;
-  }
 }
 
 function startOverlayAnimation() {
@@ -479,7 +451,7 @@ async function onSearch() {
   els.selectAllBtn.textContent = "Select All";
   els.selectAllBtn.disabled = true;
   els.downloadSelectedBtn.disabled = true;
-  showSearchOverlay("search");
+  showSearchOverlay();
 
   try {
     const payload = { imageBase64, topK: SEARCH_TOP_K, maxDistance: SEARCH_MAX_DISTANCE };

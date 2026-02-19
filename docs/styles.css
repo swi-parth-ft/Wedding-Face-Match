@@ -344,10 +344,6 @@ code {
   flex: 1 1 180px;
 }
 
-#demoOverlayBtn {
-  flex: 1 0 100%;
-}
-
 .query-preview {
   margin-top: 0.65rem;
   width: 100%;
