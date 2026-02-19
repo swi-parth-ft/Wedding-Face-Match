@@ -40,7 +40,9 @@ const els = {
 init();
 
 function init() {
-  els.datasetLink.href = HARDCODED_DRIVE_FOLDER_LINK;
+  if (els.datasetLink) {
+    els.datasetLink.href = HARDCODED_DRIVE_FOLDER_LINK;
+  }
 
   els.queryImageInput.addEventListener("change", onFileSelectionChanged);
   els.openCameraBtn.addEventListener("click", onOpenCameraModal);
