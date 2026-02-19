@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Drive Face Finder</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@300;400;600;700;800&family=IBM+Plex+Mono:wght@400;500&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="bg-orb orb-a"></div>
+    <div class="bg-orb orb-b"></div>
+    <main class="layout">
+      <header class="hero">
+        <p class="eyebrow">Helly &amp; Anish</p>
+        <h1>Wedding Face Finder</h1>
+        <p class="subtitle">Find and download your photos by face.</p>
+      </header>
+
+      <section class="card">
+        <h2>Search By Face</h2>
+        <p class="helper">
+          Source Drive folder is fixed for this app:
+          <a id="datasetLink" href="#" target="_blank" rel="noreferrer">Open dataset folder</a>
+        </p>
+
+        <div class="search-shell">
+          <button id="openCameraBtn" class="btn capture-main">Capture Face (Recommended)</button>
+
+          <label for="queryImageInput" class="stack-top">Or Upload a Photo</label>
+          <input id="queryImageInput" type="file" accept="image/*" />
+
+          <div class="source-actions">
+            <button id="clearPhotoBtn" class="btn ghost">Clear Photo</button>
+          </div>
+
+          <p id="querySourceMeta" class="status-line">No query image selected.</p>
+          <img
+            id="queryPreview"
+            class="query-preview hidden"
+            alt="Selected query image preview"
+          />
+
+          <div class="actions search-actions">
+            <button id="searchBtn" class="btn secondary">Search Matches</button>
+            <button id="downloadSelectedBtn" class="btn secondary" disabled>
+              Download Selected ZIP
+            </button>
+          </div>
+        </div>
+
+        <p id="searchMeta" class="status-line"></p>
+        <div id="results" class="results"></div>
+      </section>
+    </main>
+
+    <div id="cameraModal" class="camera-modal hidden" aria-hidden="true">
+      <div class="camera-dialog" role="dialog" aria-modal="true" aria-label="Capture face photo">
+        <div class="camera-header">
+          <h3>Capture Face</h3>
+          <button id="closeCameraBtn" class="btn ghost">Close</button>
+        </div>
+        <p class="camera-tip">
+          Keep one face centered in the oval. Keep eyes near the horizontal line and look straight.
+        </p>
+        <div class="camera-stage">
+          <video id="cameraVideo" playsinline autoplay muted></video>
+          <img id="cameraPreview" class="hidden" alt="Captured face preview" />
+          <div id="cameraOverlay" class="camera-overlay">
+            <div class="guide-oval"></div>
+            <div class="guide-eye-line"></div>
+            <div class="guide-text">Align face in this area</div>
+          </div>
+        </div>
+        <canvas id="cameraCanvas" class="hidden"></canvas>
+        <div class="actions">
+          <button id="capturePhotoBtn" class="btn">Capture</button>
+          <button id="resetPhotoBtn" class="btn ghost hidden">Reset</button>
+          <button id="usePhotoBtn" class="btn secondary hidden">Use Photo</button>
+        </div>
+        <p id="cameraStatus" class="status-line"></p>
+      </div>
+    </div>
+
+    <script src="app.js" type="module"></script>
+  </body>
+</html>

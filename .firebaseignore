@@ -1,0 +1,8 @@
+.git/
+.github/
+.firebase/
+**/__pycache__/
+**/*.pyc
+functions/venv/
+functions/.env
+output_faces/

@@ -1,0 +1,9 @@
+firebase-functions>=0.4.3
+firebase-admin>=6.5.0
+google-api-python-client>=2.149.0
+google-auth>=2.35.0
+requests>=2.32.0
+numpy>=1.26.0
+opencv-python-headless>=4.10.0.84
+insightface>=0.7.3
+onnxruntime>=1.20.0
