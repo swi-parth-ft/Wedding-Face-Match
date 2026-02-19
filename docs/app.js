@@ -4,6 +4,8 @@ const HARDCODED_DRIVE_FOLDER_LINK =
   "https://drive.google.com/drive/folders/1EF9ddrU0dWt3H5c43Rt_yS54TZRK_TgB?usp=sharing";
 const SEARCH_TOP_K = 0; // 0 means return all matches
 const SEARCH_MAX_DISTANCE = 0.35;
+const SEARCH_REQUEST_RETRIES = 5;
+const SEARCH_REQUEST_TIMEOUT_MS = 120000;
 
 const state = {
   matches: [],
@@ -459,7 +461,10 @@ async function onSearch() {
 
   try {
     const payload = { imageBase64, topK: SEARCH_TOP_K, maxDistance: SEARCH_MAX_DISTANCE };
-    const data = await postJson(fnUrl("search"), payload, { retries: 2 });
+    const data = await postJson(fnUrl("search"), payload, {
+      retries: SEARCH_REQUEST_RETRIES,
+      timeoutMs: SEARCH_REQUEST_TIMEOUT_MS,
+    });
     state.matches = Array.isArray(data.matches) ? data.matches : [];
 
     els.searchMeta.textContent = `Query faces: ${
@@ -583,20 +588,25 @@ async function onDownloadSelected() {
 
 async function postJson(url, payload, options = {}) {
   const retries = clampInt(options.retries ?? 0, 0, 5, 0);
+  const timeoutMs = clampInt(options.timeoutMs ?? 45000, 5000, 180000, 45000);
   let attempt = 0;
 
   while (true) {
     let response;
     try {
-      response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
-      });
+      response = await fetchWithTimeout(
+        url,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        timeoutMs
+      );
     } catch (err) {
       if (attempt < retries && isRetryableFetchError(err)) {
         attempt += 1;
-        await sleep(600 * attempt);
+        await sleep(backoffDelayMs(attempt));
         continue;
       }
       throw err;
@@ -611,10 +621,38 @@ async function postJson(url, payload, options = {}) {
     }
 
     if (!response.ok) {
+      if (attempt < retries && isRetryableHttpStatus(response.status)) {
+        attempt += 1;
+        await sleep(backoffDelayMs(attempt));
+        continue;
+      }
       throw new Error(data.error || data.raw || `HTTP ${response.status}`);
     }
     return data;
   }
+}
+
+async function fetchWithTimeout(url, init, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, {
+      ...init,
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function backoffDelayMs(attempt) {
+  const base = Math.min(6000, 500 * 2 ** (attempt - 1));
+  const jitter = Math.floor(Math.random() * 350);
+  return base + jitter;
+}
+
+function isRetryableHttpStatus(status) {
+  return status === 408 || status === 425 || status === 429 || status === 500 || status === 502 || status === 503 || status === 504;
 }
 
 function fileToBase64(file) {
@@ -685,11 +723,16 @@ function errorText(err) {
 }
 
 function isRetryableFetchError(err) {
+  if (err && typeof err === "object" && err.name === "AbortError") {
+    return true;
+  }
   const msg = errorText(err).toLowerCase();
   return (
     msg.includes("load failed") ||
     msg.includes("failed to fetch") ||
-    msg.includes("networkerror")
+    msg.includes("networkerror") ||
+    msg.includes("network connection was lost") ||
+    msg.includes("network request failed")
   );
 }
 
