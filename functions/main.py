@@ -16,15 +16,18 @@ import json
 import os
 import re
 import threading
+import tempfile
 import time
+import uuid
 import zipfile
 import zlib
 from typing import Any
+from urllib.parse import quote
 
 import firebase_admin
 import google.auth
 import requests
-from firebase_admin import firestore
+from firebase_admin import firestore, storage
 from firebase_functions import https_fn
 from firebase_functions.options import MemoryOption
 from google.auth.transport.requests import AuthorizedSession
@@ -52,6 +55,8 @@ SEARCH_INDEX_RETRY_BASE_SLEEP_SECONDS = float(
     os.getenv("SEARCH_INDEX_RETRY_BASE_SLEEP_SECONDS", "0.35")
 )
 DOWNLOAD_MAX_FILES_PER_ZIP = int(os.getenv("DOWNLOAD_MAX_FILES_PER_ZIP", "80"))
+DEFAULT_DOWNLOAD_RESPONSE_MODE = os.getenv("DEFAULT_DOWNLOAD_RESPONSE_MODE", "binary")
+DOWNLOAD_OBJECT_PREFIX = os.getenv("DOWNLOAD_OBJECT_PREFIX", "zip_downloads")
 FACE_MODEL_NAME = os.getenv("FACE_MODEL_NAME", "buffalo_l")
 FACE_DET_SIZE = int(os.getenv("FACE_DET_SIZE", "640"))
 FACE_MODEL_MODULES = [
@@ -332,6 +337,40 @@ def _public_download_url(file_id: str) -> str:
 
 def _public_preview_url(file_id: str) -> str:
     return f"https://drive.google.com/thumbnail?id={file_id}&sz=w1200"
+
+
+def _firebase_download_url(bucket_name: str, object_name: str, token: str) -> str:
+    encoded = quote(object_name, safe="")
+    return (
+        f"https://firebasestorage.googleapis.com/v0/b/{bucket_name}/o/{encoded}"
+        f"?alt=media&token={token}"
+    )
+
+
+def _upload_zip_to_storage(zip_path: str, zip_filename: str) -> dict[str, str]:
+    bucket = storage.bucket()
+    if bucket is None:
+        raise RuntimeError("Storage bucket is not configured")
+
+    safe_prefix = re.sub(r"[^a-zA-Z0-9/_-]+", "", DOWNLOAD_OBJECT_PREFIX).strip("/") or "zip_downloads"
+    object_name = f"{safe_prefix}/{int(time.time())}-{uuid.uuid4().hex[:10]}-{zip_filename}"
+    token = str(uuid.uuid4())
+
+    blob = bucket.blob(object_name)
+    blob.content_type = "application/zip"
+    blob.cache_control = "private, max-age=3600"
+    blob.content_disposition = f'attachment; filename="{zip_filename}"'
+    blob.metadata = {
+        "firebaseStorageDownloadTokens": token,
+        "createdAt": str(int(time.time())),
+    }
+    blob.upload_from_filename(zip_path, content_type="application/zip")
+
+    return {
+        "bucket": bucket.name,
+        "objectName": object_name,
+        "downloadUrl": _firebase_download_url(bucket.name, object_name, token),
+    }
 
 
 def _compact_drive_item(item: dict[str, Any]) -> dict[str, str] | None:
@@ -643,6 +682,33 @@ def _cosine_distance(a: Any, b: Any) -> float:
     return float(1.0 - float(np.dot(a, b)))
 
 
+def _append_files_to_zip(zf: zipfile.ZipFile, file_ids: list[str]) -> list[str]:
+    errors: list[str] = []
+    used_names: set[str] = set()
+
+    for file_id in file_ids:
+        try:
+            meta = _get_drive_file_meta(file_id)
+            source_name = str(meta.get("name") or f"{file_id}.jpg")
+            name = _safe_filename(source_name)
+            if "." not in name:
+                name += ".jpg"
+            if name in used_names:
+                base, ext = os.path.splitext(name)
+                n = 2
+                while f"{base}_{n}{ext}" in used_names:
+                    n += 1
+                name = f"{base}_{n}{ext}"
+            used_names.add(name)
+
+            blob = _download_drive_file_bytes(file_id)
+            zf.writestr(name, blob)
+        except Exception as exc:  # noqa: BLE001
+            errors.append(f"{file_id}: {exc}")
+
+    return errors
+
+
 @https_fn.on_request(timeout_sec=540)
 def health(req: https_fn.Request) -> https_fn.Response:
     if req.method == "OPTIONS":
@@ -815,6 +881,10 @@ def download_matches_zip(req: https_fn.Request) -> https_fn.Response:
         return _json_response({"error": "Use POST"}, status=405)
 
     payload = _read_json(req)
+    response_mode = str(payload.get("responseMode") or DEFAULT_DOWNLOAD_RESPONSE_MODE).strip().lower()
+    if response_mode not in {"binary", "url"}:
+        response_mode = "binary"
+
     raw_ids = payload.get("fileIds")
     if not isinstance(raw_ids, list) or not raw_ids:
         return _json_response({"error": "fileIds must be a non-empty array"}, status=400)
@@ -837,38 +907,50 @@ def download_matches_zip(req: https_fn.Request) -> https_fn.Response:
         )
 
     zip_name = _safe_filename(str(payload.get("zipName") or "face-matches"))
-    zip_bytes = io.BytesIO()
-    errors: list[str] = []
-    used_names: set[str] = set()
+    zip_filename = f"{zip_name}.zip"
 
-    with zipfile.ZipFile(zip_bytes, "w", zipfile.ZIP_DEFLATED) as zf:
-        for file_id in unique_file_ids:
+    try:
+        if response_mode == "url":
+            tmp_path = ""
             try:
-                meta = _get_drive_file_meta(file_id)
-                source_name = str(meta.get("name") or f"{file_id}.jpg")
-                name = _safe_filename(source_name)
-                if "." not in name:
-                    name += ".jpg"
-                if name in used_names:
-                    base, ext = os.path.splitext(name)
-                    n = 2
-                    while f"{base}_{n}{ext}" in used_names:
-                        n += 1
-                    name = f"{base}_{n}{ext}"
-                used_names.add(name)
+                with tempfile.NamedTemporaryFile(
+                    prefix="face-matches-",
+                    suffix=".zip",
+                    delete=False,
+                ) as tmp_file:
+                    tmp_path = tmp_file.name
 
-                blob = _download_drive_file_bytes(file_id)
-                zf.writestr(name, blob)
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"{file_id}: {exc}")
+                with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    errors = _append_files_to_zip(zf, unique_file_ids)
 
-    zip_bytes.seek(0)
-    resp = _binary_response(
-        data=zip_bytes.read(),
-        content_type="application/zip",
-        filename=f"{zip_name}.zip",
-    )
-    resp.headers["X-Download-Error-Count"] = str(len(errors))
-    if errors:
-        resp.headers["X-Download-Error-Sample"] = "; ".join(errors[:3])[:900]
-    return resp
+                uploaded = _upload_zip_to_storage(tmp_path, zip_filename=zip_filename)
+                return _json_response(
+                    {
+                        "mode": "url",
+                        "fileName": zip_filename,
+                        "requestedFileCount": len(unique_file_ids),
+                        "errorCount": len(errors),
+                        "errorSample": errors[:3],
+                        **uploaded,
+                    }
+                )
+            finally:
+                if tmp_path and os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+
+        zip_bytes = io.BytesIO()
+        with zipfile.ZipFile(zip_bytes, "w", zipfile.ZIP_DEFLATED) as zf:
+            errors = _append_files_to_zip(zf, unique_file_ids)
+
+        zip_bytes.seek(0)
+        resp = _binary_response(
+            data=zip_bytes.read(),
+            content_type="application/zip",
+            filename=zip_filename,
+        )
+        resp.headers["X-Download-Error-Count"] = str(len(errors))
+        if errors:
+            resp.headers["X-Download-Error-Sample"] = "; ".join(errors[:3])[:900]
+        return resp
+    except Exception as exc:  # noqa: BLE001
+        return _json_response({"error": f"Failed to prepare zip: {exc}"}, status=500)

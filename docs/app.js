@@ -6,9 +6,6 @@ const SEARCH_TOP_K = 0; // 0 means return all matches
 const SEARCH_MAX_DISTANCE = 0.35;
 const SEARCH_REQUEST_RETRIES = 5;
 const SEARCH_REQUEST_TIMEOUT_MS = 120000;
-const DOWNLOAD_BATCH_SIZE = 60;
-const DOWNLOAD_REQUEST_RETRIES = 3;
-const DOWNLOAD_REQUEST_TIMEOUT_MS = 420000;
 
 const state = {
   matches: [],
@@ -34,8 +31,6 @@ const els = {
   searchBtn: document.getElementById("searchBtn"),
   searchMeta: document.getElementById("searchMeta"),
   results: document.getElementById("results"),
-  selectAllBtn: document.getElementById("selectAllBtn"),
-  downloadSelectedBtn: document.getElementById("downloadSelectedBtn"),
   searchOverlay: document.getElementById("searchOverlay"),
   searchOverlayCanvas: document.getElementById("searchOverlayCanvas"),
   searchOverlayMessage: document.getElementById("searchOverlayMessage"),
@@ -63,9 +58,6 @@ function init() {
   els.openCameraBtn.addEventListener("click", onOpenCameraModal);
   els.clearPhotoBtn.addEventListener("click", clearQuerySource);
   els.searchBtn.addEventListener("click", onSearch);
-  els.selectAllBtn.addEventListener("click", onToggleSelectAll);
-  els.downloadSelectedBtn.addEventListener("click", onDownloadSelected);
-  els.results.addEventListener("change", onResultsSelectionChanged);
 
   els.closeCameraBtn.addEventListener("click", closeCameraModal);
   els.capturePhotoBtn.addEventListener("click", capturePhoto);
@@ -457,9 +449,6 @@ async function onSearch() {
   els.searchBtn.disabled = true;
   els.results.innerHTML = "";
   state.matches = [];
-  els.selectAllBtn.textContent = "Select All";
-  els.selectAllBtn.disabled = true;
-  els.downloadSelectedBtn.disabled = true;
   showSearchOverlay();
 
   try {
@@ -491,7 +480,6 @@ function renderResults(matches) {
   els.results.innerHTML = "";
   if (!matches.length) {
     els.results.innerHTML = `<p class="status-line">No matches found.</p>`;
-    updateSelectionControls();
     return;
   }
 
@@ -506,10 +494,6 @@ function renderResults(matches) {
         <p class="result-meta">Distance: ${Number(m.distance || 0).toFixed(4)} | Score: ${Number(
       m.score || 0
     ).toFixed(4)}</p>
-        <label class="check-row">
-          <input type="checkbox" data-file-id="${escapeHtml(m.fileId || "")}" />
-          Select for zip
-        </label>
         <div class="result-links">
           <a href="${escapeHtml(m.webViewLink || "#")}" target="_blank" rel="noreferrer">Open</a>
           <a href="${escapeHtml(m.downloadUrl || "#")}" target="_blank" rel="noreferrer">Download</a>
@@ -519,106 +503,6 @@ function renderResults(matches) {
     frag.appendChild(card);
   }
   els.results.appendChild(frag);
-  updateSelectionControls();
-}
-
-function onResultsSelectionChanged(ev) {
-  const target = ev.target;
-  if (!(target instanceof HTMLInputElement)) return;
-  if (!target.matches('input[type="checkbox"][data-file-id]')) return;
-  updateSelectionControls();
-}
-
-function onToggleSelectAll() {
-  const boxes = getResultCheckboxes();
-  if (!boxes.length) return;
-  const shouldSelect = boxes.some((box) => !box.checked);
-  for (const box of boxes) {
-    box.checked = shouldSelect;
-  }
-  updateSelectionControls();
-}
-
-async function onDownloadSelected() {
-  const checked = Array.from(
-    els.results.querySelectorAll('input[type="checkbox"][data-file-id]:checked')
-  );
-  const fileIds = checked
-    .map((el) => el.getAttribute("data-file-id"))
-    .filter((v) => typeof v === "string" && v.length > 0);
-
-  if (!fileIds.length) {
-    els.searchMeta.textContent = "Select at least one result to download.";
-    return;
-  }
-
-  els.downloadSelectedBtn.disabled = true;
-  els.selectAllBtn.disabled = true;
-  const batchSize = clampInt(DOWNLOAD_BATCH_SIZE, 1, 80, 60);
-  const batches = chunkArray(fileIds, batchSize);
-  const totalFiles = fileIds.length;
-  let totalErrCount = 0;
-
-  try {
-    for (let i = 0; i < batches.length; i += 1) {
-      const batch = batches[i];
-      const part = i + 1;
-      const partLabel = `${part}/${batches.length}`;
-      els.searchMeta.textContent = `Preparing zip ${partLabel} (${batch.length} file(s))...`;
-
-      const response = await postBlobWithRetry(
-        fnUrl("download_matches_zip"),
-        {
-          fileIds: batch,
-          zipName: `face-matches-part-${String(part).padStart(2, "0")}-of-${String(
-            batches.length
-          ).padStart(2, "0")}-${Date.now()}`,
-        },
-        {
-          retries: DOWNLOAD_REQUEST_RETRIES,
-          timeoutMs: DOWNLOAD_REQUEST_TIMEOUT_MS,
-        }
-      );
-
-      const blob = await response.blob();
-      const fallbackName =
-        batches.length > 1
-          ? `face-matches-part-${String(part).padStart(2, "0")}-of-${String(
-              batches.length
-            ).padStart(2, "0")}.zip`
-          : `face-matches-${Date.now()}.zip`;
-      const filename =
-        getFilenameFromDisposition(response.headers.get("content-disposition")) || fallbackName;
-      downloadBlob(blob, filename);
-
-      const errCount = Number(response.headers.get("x-download-error-count") || 0);
-      if (Number.isFinite(errCount) && errCount > 0) {
-        totalErrCount += errCount;
-      }
-
-      // Prevent burst download throttling in some browsers.
-      if (part < batches.length) {
-        await sleep(500);
-      }
-    }
-
-    if (totalErrCount > 0) {
-      els.searchMeta.textContent =
-        batches.length > 1
-          ? `Downloaded ${batches.length} zip files for ${totalFiles} selected image(s) with ${totalErrCount} file error(s).`
-          : `ZIP downloaded with ${totalErrCount} file error(s).`;
-    } else {
-      els.searchMeta.textContent =
-        batches.length > 1
-          ? `Downloaded ${batches.length} zip files for ${totalFiles} selected image(s).`
-          : "ZIP downloaded.";
-    }
-  } catch (err) {
-    els.searchMeta.textContent = `ZIP download failed: ${errorText(err)}`;
-  } finally {
-    els.selectAllBtn.disabled = false;
-    els.downloadSelectedBtn.disabled = false;
-  }
 }
 
 async function postJson(url, payload, options = {}) {
@@ -667,54 +551,6 @@ async function postJson(url, payload, options = {}) {
   }
 }
 
-async function postBlobWithRetry(url, payload, options = {}) {
-  const retries = clampInt(options.retries ?? 0, 0, 5, 0);
-  const timeoutMs = clampInt(options.timeoutMs ?? 60000, 5000, 540000, 60000);
-  let attempt = 0;
-
-  while (true) {
-    let response;
-    try {
-      response = await fetchWithTimeout(
-        url,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        },
-        timeoutMs
-      );
-    } catch (err) {
-      if (attempt < retries && isRetryableFetchError(err)) {
-        attempt += 1;
-        await sleep(backoffDelayMs(attempt));
-        continue;
-      }
-      throw err;
-    }
-
-    if (!response.ok) {
-      const text = await response.text();
-      let message = text || `HTTP ${response.status}`;
-      try {
-        const data = text ? JSON.parse(text) : {};
-        message = data.error || data.raw || message;
-      } catch {
-        // Keep raw text fallback.
-      }
-
-      if (attempt < retries && isRetryableHttpStatus(response.status)) {
-        attempt += 1;
-        await sleep(backoffDelayMs(attempt));
-        continue;
-      }
-      throw new Error(message);
-    }
-
-    return response;
-  }
-}
-
 async function fetchWithTimeout(url, init, timeoutMs) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -751,55 +587,10 @@ function fileToBase64(file) {
   });
 }
 
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  URL.revokeObjectURL(url);
-}
-
-function getFilenameFromDisposition(disposition) {
-  if (!disposition) return "";
-  const m = disposition.match(/filename="([^"]+)"/i);
-  return m ? m[1] : "";
-}
-
 function clampInt(raw, min, max, fallback) {
   const n = Number.parseInt(raw, 10);
   if (Number.isNaN(n)) return fallback;
   return Math.min(max, Math.max(min, n));
-}
-
-function getResultCheckboxes() {
-  return Array.from(els.results.querySelectorAll('input[type="checkbox"][data-file-id]'));
-}
-
-function chunkArray(items, chunkSize) {
-  const out = [];
-  for (let i = 0; i < items.length; i += chunkSize) {
-    out.push(items.slice(i, i + chunkSize));
-  }
-  return out;
-}
-
-function updateSelectionControls() {
-  const boxes = getResultCheckboxes();
-  if (!boxes.length) {
-    els.selectAllBtn.disabled = true;
-    els.selectAllBtn.textContent = "Select All";
-    els.downloadSelectedBtn.disabled = true;
-    return;
-  }
-
-  const checkedCount = boxes.filter((box) => box.checked).length;
-  const allSelected = checkedCount === boxes.length;
-  els.selectAllBtn.disabled = false;
-  els.selectAllBtn.textContent = allSelected ? "Unselect All" : "Select All";
-  els.downloadSelectedBtn.disabled = checkedCount === 0;
 }
 
 function sleep(ms) {
