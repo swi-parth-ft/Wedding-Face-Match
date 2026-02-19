@@ -11,6 +11,13 @@ const state = {
   capturedDraftDataUrl: "",
   previewObjectUrl: "",
   cameraStream: null,
+  overlayRunning: false,
+  overlayRafId: 0,
+  overlayRockets: [],
+  overlayParticles: [],
+  overlayLastTs: 0,
+  overlaySpawnAccumulatorMs: 0,
+  overlayAutoHideTimer: 0,
 };
 
 const els = {
@@ -25,6 +32,11 @@ const els = {
   results: document.getElementById("results"),
   selectAllBtn: document.getElementById("selectAllBtn"),
   downloadSelectedBtn: document.getElementById("downloadSelectedBtn"),
+  demoOverlayBtn: document.getElementById("demoOverlayBtn"),
+  searchOverlay: document.getElementById("searchOverlay"),
+  searchOverlayCanvas: document.getElementById("searchOverlayCanvas"),
+  searchOverlayMessage: document.getElementById("searchOverlayMessage"),
+  searchOverlaySubtext: document.getElementById("searchOverlaySubtext"),
   cameraModal: document.getElementById("cameraModal"),
   closeCameraBtn: document.getElementById("closeCameraBtn"),
   capturePhotoBtn: document.getElementById("capturePhotoBtn"),
@@ -50,6 +62,9 @@ function init() {
   els.searchBtn.addEventListener("click", onSearch);
   els.selectAllBtn.addEventListener("click", onToggleSelectAll);
   els.downloadSelectedBtn.addEventListener("click", onDownloadSelected);
+  if (els.demoOverlayBtn) {
+    els.demoOverlayBtn.addEventListener("click", onDemoOverlay);
+  }
   els.results.addEventListener("change", onResultsSelectionChanged);
 
   els.closeCameraBtn.addEventListener("click", closeCameraModal);
@@ -69,7 +84,10 @@ function init() {
     }
   });
 
-  window.addEventListener("beforeunload", stopCameraStream);
+  window.addEventListener("beforeunload", () => {
+    stopCameraStream();
+    hideSearchOverlay();
+  });
 }
 
 function fnUrl(name) {
@@ -233,6 +251,212 @@ function setCapturedUiState(hasCapture) {
   els.usePhotoBtn.classList.toggle("hidden", !hasCapture);
 }
 
+function onDemoOverlay() {
+  showSearchOverlay("demo", 4200);
+}
+
+function showSearchOverlay(mode = "search", autoHideMs = 0) {
+  if (!els.searchOverlay) return;
+
+  clearOverlayAutoHideTimer();
+  if (els.searchOverlayMessage) {
+    els.searchOverlayMessage.textContent =
+      mode === "search" ? "Searching your photos..." : "Fireworks Preview";
+  }
+  if (els.searchOverlaySubtext) {
+    els.searchOverlaySubtext.textContent =
+      mode === "search"
+        ? "Please wait while we find your matches."
+        : "This is how the live search celebration overlay looks.";
+  }
+
+  els.searchOverlay.classList.remove("hidden");
+  els.searchOverlay.setAttribute("aria-hidden", "false");
+  document.body.classList.add("overlay-active");
+  startOverlayAnimation();
+
+  if (autoHideMs > 0) {
+    state.overlayAutoHideTimer = window.setTimeout(() => {
+      hideSearchOverlay();
+    }, autoHideMs);
+  }
+}
+
+function hideSearchOverlay() {
+  clearOverlayAutoHideTimer();
+  stopOverlayAnimation();
+  if (!els.searchOverlay) return;
+  els.searchOverlay.classList.add("hidden");
+  els.searchOverlay.setAttribute("aria-hidden", "true");
+  document.body.classList.remove("overlay-active");
+}
+
+function clearOverlayAutoHideTimer() {
+  if (state.overlayAutoHideTimer) {
+    clearTimeout(state.overlayAutoHideTimer);
+    state.overlayAutoHideTimer = 0;
+  }
+}
+
+function startOverlayAnimation() {
+  if (state.overlayRunning || !els.searchOverlayCanvas) return;
+  state.overlayRunning = true;
+  state.overlayRockets = [];
+  state.overlayParticles = [];
+  state.overlayLastTs = 0;
+  state.overlaySpawnAccumulatorMs = 0;
+  resizeOverlayCanvas();
+  window.addEventListener("resize", resizeOverlayCanvas);
+  state.overlayRafId = requestAnimationFrame(stepOverlayAnimation);
+}
+
+function stopOverlayAnimation() {
+  if (!state.overlayRunning) return;
+  state.overlayRunning = false;
+  window.removeEventListener("resize", resizeOverlayCanvas);
+  if (state.overlayRafId) {
+    cancelAnimationFrame(state.overlayRafId);
+    state.overlayRafId = 0;
+  }
+  state.overlayRockets = [];
+  state.overlayParticles = [];
+  state.overlayLastTs = 0;
+  state.overlaySpawnAccumulatorMs = 0;
+
+  const canvas = els.searchOverlayCanvas;
+  if (!canvas) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+}
+
+function resizeOverlayCanvas() {
+  const canvas = els.searchOverlayCanvas;
+  if (!canvas) return;
+  const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  const w = Math.max(1, Math.floor(window.innerWidth));
+  const h = Math.max(1, Math.floor(window.innerHeight));
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  canvas.style.width = `${w}px`;
+  canvas.style.height = `${h}px`;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+function stepOverlayAnimation(ts) {
+  if (!state.overlayRunning || !els.searchOverlayCanvas) return;
+  const canvas = els.searchOverlayCanvas;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    state.overlayRafId = requestAnimationFrame(stepOverlayAnimation);
+    return;
+  }
+
+  const width = canvas.clientWidth || window.innerWidth;
+  const height = canvas.clientHeight || window.innerHeight;
+  if (!state.overlayLastTs) {
+    state.overlayLastTs = ts;
+  }
+  const dt = Math.min(42, ts - state.overlayLastTs);
+  state.overlayLastTs = ts;
+
+  ctx.fillStyle = "rgba(16, 4, 12, 0.25)";
+  ctx.fillRect(0, 0, width, height);
+
+  state.overlaySpawnAccumulatorMs += dt;
+  if (state.overlaySpawnAccumulatorMs >= 340) {
+    state.overlaySpawnAccumulatorMs = 0;
+    spawnFireworkRocket(width, height);
+    if (Math.random() < 0.35) {
+      spawnFireworkRocket(width, height);
+    }
+  }
+
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+
+  for (let i = state.overlayRockets.length - 1; i >= 0; i -= 1) {
+    const rocket = state.overlayRockets[i];
+    rocket.vy += 0.035;
+    rocket.x += rocket.vx;
+    rocket.y += rocket.vy;
+
+    ctx.fillStyle = `hsla(${rocket.hue}, 98%, 66%, 0.9)`;
+    ctx.beginPath();
+    ctx.arc(rocket.x, rocket.y, 2.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (rocket.y <= rocket.targetY || rocket.vy >= -0.3) {
+      explodeFirework(rocket);
+      state.overlayRockets.splice(i, 1);
+    }
+  }
+
+  for (let i = state.overlayParticles.length - 1; i >= 0; i -= 1) {
+    const p = state.overlayParticles[i];
+    p.vx *= 0.986;
+    p.vy += 0.046;
+    p.x += p.vx;
+    p.y += p.vy;
+    p.life -= dt * 0.06;
+
+    if (p.life <= 0) {
+      state.overlayParticles.splice(i, 1);
+      continue;
+    }
+
+    const alpha = Math.max(0, Math.min(1, p.life / p.maxLife));
+    ctx.fillStyle = `hsla(${p.hue}, 98%, 67%, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size * alpha + 0.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  state.overlayRafId = requestAnimationFrame(stepOverlayAnimation);
+}
+
+function spawnFireworkRocket(width, height) {
+  state.overlayRockets.push({
+    x: width * (0.1 + Math.random() * 0.8),
+    y: height + 12,
+    vx: (Math.random() - 0.5) * 1.1,
+    vy: -(6.4 + Math.random() * 2.2),
+    targetY: height * (0.18 + Math.random() * 0.45),
+    hue: 8 + Math.random() * 58,
+  });
+
+  if (state.overlayRockets.length > 22) {
+    state.overlayRockets.splice(0, state.overlayRockets.length - 22);
+  }
+}
+
+function explodeFirework(rocket) {
+  const count = 30 + Math.floor(Math.random() * 24);
+  for (let i = 0; i < count; i += 1) {
+    const angle = (Math.PI * 2 * i) / count + Math.random() * 0.25;
+    const speed = 1.1 + Math.random() * 3.8;
+    const life = 45 + Math.random() * 42;
+    state.overlayParticles.push({
+      x: rocket.x,
+      y: rocket.y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life,
+      maxLife: life,
+      size: 1.2 + Math.random() * 2.4,
+      hue: rocket.hue + (Math.random() * 26 - 13),
+    });
+  }
+
+  if (state.overlayParticles.length > 1400) {
+    state.overlayParticles.splice(0, state.overlayParticles.length - 1400);
+  }
+}
+
 async function onSearch() {
   const file = els.queryImageInput.files?.[0];
   let imageBase64 = "";
@@ -255,6 +479,7 @@ async function onSearch() {
   els.selectAllBtn.textContent = "Select All";
   els.selectAllBtn.disabled = true;
   els.downloadSelectedBtn.disabled = true;
+  showSearchOverlay("search");
 
   try {
     const payload = { imageBase64, topK: SEARCH_TOP_K, maxDistance: SEARCH_MAX_DISTANCE };
@@ -273,6 +498,7 @@ async function onSearch() {
   } catch (err) {
     els.searchMeta.textContent = `Search failed: ${errorText(err)}`;
   } finally {
+    hideSearchOverlay();
     els.searchBtn.disabled = false;
   }
 }

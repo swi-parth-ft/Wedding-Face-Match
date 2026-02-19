@@ -50,6 +50,7 @@
             <button id="downloadSelectedBtn" class="btn secondary" disabled>
               Download Selected ZIP
             </button>
+            <button id="demoOverlayBtn" class="btn ghost" type="button">Demo Fireworks</button>
           </div>
         </div>
 
@@ -59,6 +60,16 @@
 
       <p class="credit-line">Build by Parth with ❤️</p>
     </main>
+
+    <div id="searchOverlay" class="search-overlay hidden" aria-hidden="true">
+      <canvas id="searchOverlayCanvas"></canvas>
+      <div class="search-overlay-center">
+        <p id="searchOverlayMessage" class="search-overlay-title">Searching your photos...</p>
+        <p id="searchOverlaySubtext" class="search-overlay-subtitle">
+          Please wait while we find your matches.
+        </p>
+      </div>
+    </div>
 
     <div id="cameraModal" class="camera-modal hidden" aria-hidden="true">
       <div class="camera-dialog" role="dialog" aria-modal="true" aria-label="Capture face photo">
