@@ -4,5 +4,7 @@
 **/__pycache__/
 **/*.pyc
 functions/venv/
+venv/
 functions/.env
+.env
 output_faces/

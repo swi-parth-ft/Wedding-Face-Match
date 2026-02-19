@@ -15,6 +15,8 @@ import io
 import json
 import os
 import re
+import threading
+import time
 import zipfile
 import zlib
 from typing import Any
@@ -43,6 +45,13 @@ MAX_FILES_PER_CHUNK_CAP = int(os.getenv("MAX_FILES_PER_CHUNK_CAP", "200"))
 DEFAULT_MIN_FACE_SIZE = int(os.getenv("MIN_FACE_SIZE", "40"))
 DEFAULT_SEARCH_MAX_DISTANCE = float(os.getenv("SEARCH_MAX_DISTANCE", "0.35"))
 DEFAULT_SEARCH_TOP_K = int(os.getenv("SEARCH_TOP_K", "0"))
+SEARCH_CACHE_TTL_SECONDS = int(os.getenv("SEARCH_CACHE_TTL_SECONDS", "1800"))
+SEARCH_INDEX_PAGE_SIZE = int(os.getenv("SEARCH_INDEX_PAGE_SIZE", "250"))
+SEARCH_INDEX_PAGE_RETRIES = int(os.getenv("SEARCH_INDEX_PAGE_RETRIES", "4"))
+SEARCH_INDEX_RETRY_BASE_SLEEP_SECONDS = float(
+    os.getenv("SEARCH_INDEX_RETRY_BASE_SLEEP_SECONDS", "0.35")
+)
+DOWNLOAD_MAX_FILES_PER_ZIP = int(os.getenv("DOWNLOAD_MAX_FILES_PER_ZIP", "80"))
 FACE_MODEL_NAME = os.getenv("FACE_MODEL_NAME", "buffalo_l")
 FACE_DET_SIZE = int(os.getenv("FACE_DET_SIZE", "640"))
 FACE_MODEL_MODULES = [
@@ -61,6 +70,9 @@ _DRIVE_SERVICE = None
 _DRIVE_API_KEY = os.getenv("DRIVE_API_KEY")
 _AUTH_SESSION: AuthorizedSession | None = None
 _FACE_APP: Any | None = None
+_FACE_INDEX_CACHE_ROWS: list[dict[str, Any]] | None = None
+_FACE_INDEX_CACHE_TS = 0.0
+_FACE_INDEX_CACHE_LOCK = threading.Lock()
 
 
 def _np() -> Any:
@@ -537,7 +549,93 @@ def _decode_image_payload(payload: dict[str, Any]) -> bytes:
 
 
 def _iter_face_index_docs():
-    return _db().collection(FACE_INDEX_COLLECTION).stream()
+    page_size = max(50, min(int(SEARCH_INDEX_PAGE_SIZE), 1000))
+    retries = max(0, min(int(SEARCH_INDEX_PAGE_RETRIES), 8))
+    retry_base_sleep = max(float(SEARCH_INDEX_RETRY_BASE_SLEEP_SECONDS), 0.05)
+
+    last_doc = None
+    while True:
+        query = _db().collection(FACE_INDEX_COLLECTION).order_by("__name__").limit(page_size)
+        if last_doc is not None:
+            query = query.start_after(last_doc)
+
+        docs = None
+        for attempt in range(retries + 1):
+            try:
+                docs = list(query.stream())
+                break
+            except Exception as exc:  # noqa: BLE001
+                # Firestore can transiently fail with transport/unavailable errors
+                # while scanning large collections. Retry the same page with backoff.
+                if attempt >= retries:
+                    raise RuntimeError(f"face index page query failed: {exc}") from exc
+                sleep_for = retry_base_sleep * (2**attempt)
+                print(
+                    "Retrying face index page read "
+                    f"(attempt {attempt + 1}/{retries}) after error: {exc}"
+                )
+                time.sleep(min(sleep_for, 5.0))
+
+        if not docs:
+            break
+        for doc in docs:
+            yield doc
+        last_doc = docs[-1]
+
+
+def _clear_face_index_cache() -> None:
+    global _FACE_INDEX_CACHE_ROWS, _FACE_INDEX_CACHE_TS
+    with _FACE_INDEX_CACHE_LOCK:
+        _FACE_INDEX_CACHE_ROWS = None
+        _FACE_INDEX_CACHE_TS = 0.0
+
+
+def _build_face_index_cache_rows() -> list[dict[str, Any]]:
+    np = _np()
+    rows: list[dict[str, Any]] = []
+    for doc in _iter_face_index_docs():
+        data = doc.to_dict() or {}
+        emb = data.get("embedding")
+        if not isinstance(emb, list) or not emb:
+            continue
+        try:
+            cand = _normalize_embedding(np.array(emb, dtype=np.float32))
+        except Exception:
+            continue
+        rows.append(
+            {
+                "fileId": str(data.get("fileId") or ""),
+                "fileName": data.get("fileName"),
+                "faceId": data.get("faceId", doc.id),
+                "webViewLink": data.get("webViewLink"),
+                "downloadUrl": data.get("downloadUrl"),
+                "previewUrl": data.get("previewUrl"),
+                "embeddingVec": cand,
+            }
+        )
+    return rows
+
+
+def _get_face_index_rows_for_search() -> list[dict[str, Any]]:
+    global _FACE_INDEX_CACHE_ROWS, _FACE_INDEX_CACHE_TS
+
+    ttl = max(0, int(SEARCH_CACHE_TTL_SECONDS))
+    if ttl <= 0:
+        return _build_face_index_cache_rows()
+
+    now = time.time()
+    if _FACE_INDEX_CACHE_ROWS is not None and (now - _FACE_INDEX_CACHE_TS) < ttl:
+        return _FACE_INDEX_CACHE_ROWS
+
+    with _FACE_INDEX_CACHE_LOCK:
+        now = time.time()
+        if _FACE_INDEX_CACHE_ROWS is not None and (now - _FACE_INDEX_CACHE_TS) < ttl:
+            return _FACE_INDEX_CACHE_ROWS
+
+        rows = _build_face_index_cache_rows()
+        _FACE_INDEX_CACHE_ROWS = rows
+        _FACE_INDEX_CACHE_TS = now
+        return rows
 
 
 def _cosine_distance(a: Any, b: Any) -> float:
@@ -600,6 +698,9 @@ def index_chunk(req: https_fn.Request) -> https_fn.Response:
     except Exception as exc:  # noqa: BLE001
         return _json_response({"error": str(exc)}, status=500)
 
+    if int(chunk_result.get("indexedFaces", 0)) > 0:
+        _clear_face_index_cache()
+
     done = not next_state["queue"] and not next_state["buffer"]
     return _json_response(
         {
@@ -617,92 +718,96 @@ def search(req: https_fn.Request) -> https_fn.Response:
     if req.method != "POST":
         return _json_response({"error": "Use POST"}, status=405)
 
-    payload = _read_json(req)
     try:
-        image_blob = _decode_image_payload(payload)
-    except Exception as exc:  # noqa: BLE001
-        return _json_response({"error": str(exc)}, status=400)
+        payload = _read_json(req)
+        try:
+            image_blob = _decode_image_payload(payload)
+        except Exception as exc:  # noqa: BLE001
+            return _json_response({"error": str(exc)}, status=400)
 
-    try:
-        top_k = int(payload.get("topK", DEFAULT_SEARCH_TOP_K))
-    except (TypeError, ValueError):
-        top_k = DEFAULT_SEARCH_TOP_K
-    # topK <= 0 means "return all matches".
-    if top_k < 0:
-        top_k = 0
+        try:
+            top_k = int(payload.get("topK", DEFAULT_SEARCH_TOP_K))
+        except (TypeError, ValueError):
+            top_k = DEFAULT_SEARCH_TOP_K
+        # topK <= 0 means "return all matches".
+        if top_k < 0:
+            top_k = 0
 
-    try:
-        max_distance = float(payload.get("maxDistance", DEFAULT_SEARCH_MAX_DISTANCE))
-    except (TypeError, ValueError):
-        max_distance = DEFAULT_SEARCH_MAX_DISTANCE
-    max_distance = max(0.05, min(max_distance, 0.95))
+        try:
+            max_distance = float(payload.get("maxDistance", DEFAULT_SEARCH_MAX_DISTANCE))
+        except (TypeError, ValueError):
+            max_distance = DEFAULT_SEARCH_MAX_DISTANCE
+        max_distance = max(0.05, min(max_distance, 0.95))
 
-    try:
-        query_faces = _extract_face_embeddings(
-            image_blob, min_face_size=DEFAULT_MIN_FACE_SIZE
+        try:
+            query_faces = _extract_face_embeddings(
+                image_blob, min_face_size=DEFAULT_MIN_FACE_SIZE
+            )
+        except Exception as exc:  # noqa: BLE001
+            return _json_response({"error": f"Failed to process image: {exc}"}, status=400)
+
+        if not query_faces:
+            return _json_response({"error": "No face found in query image."}, status=400)
+
+        np = _np()
+
+        query_vectors = [
+            _normalize_embedding(np.array(face["embedding"], dtype=np.float32))
+            for face in query_faces
+        ]
+
+        best_by_file: dict[str, dict[str, Any]] = {}
+        scanned = 0
+        for row in _get_face_index_rows_for_search():
+            cand = row["embeddingVec"]
+            scanned += 1
+            dist = min(_cosine_distance(q, cand) for q in query_vectors)
+            if dist > max_distance:
+                continue
+
+            file_id = row["fileId"]
+            if not file_id:
+                continue
+
+            current = best_by_file.get(file_id)
+            if current is None or dist < current["distance"]:
+                best_by_file[file_id] = {
+                    "fileId": file_id,
+                    "fileName": row.get("fileName") or file_id,
+                    "faceId": row.get("faceId") or file_id,
+                    "distance": round(dist, 6),
+                    "score": round(max(0.0, 1.0 - dist), 6),
+                    "webViewLink": row.get("webViewLink")
+                    or f"https://drive.google.com/file/d/{file_id}/view",
+                    "downloadUrl": row.get("downloadUrl") or _public_download_url(file_id),
+                    "previewUrl": row.get("previewUrl") or _public_preview_url(file_id),
+                }
+
+        matches = sorted(best_by_file.values(), key=lambda row: row["distance"])
+        if top_k > 0:
+            matches = matches[:top_k]
+        return _json_response(
+            {
+                "queryFaceCount": len(query_faces),
+                "indexedFaceCountScanned": scanned,
+                "matchCount": len(matches),
+                "matches": matches,
+            }
         )
     except Exception as exc:  # noqa: BLE001
-        return _json_response({"error": f"Failed to process image: {exc}"}, status=400)
-
-    if not query_faces:
-        return _json_response({"error": "No face found in query image."}, status=400)
-
-    np = _np()
-
-    query_vectors = [
-        _normalize_embedding(np.array(face["embedding"], dtype=np.float32))
-        for face in query_faces
-    ]
-
-    best_by_file: dict[str, dict[str, Any]] = {}
-    scanned = 0
-    for doc in _iter_face_index_docs():
-        data = doc.to_dict() or {}
-        emb = data.get("embedding")
-        if not isinstance(emb, list) or not emb:
-            continue
-        try:
-            cand = _normalize_embedding(np.array(emb, dtype=np.float32))
-        except Exception:
-            continue
-
-        scanned += 1
-        dist = min(_cosine_distance(q, cand) for q in query_vectors)
-        if dist > max_distance:
-            continue
-
-        file_id = str(data.get("fileId") or "")
-        if not file_id:
-            continue
-
-        current = best_by_file.get(file_id)
-        if current is None or dist < current["distance"]:
-            best_by_file[file_id] = {
-                "fileId": file_id,
-                "fileName": data.get("fileName", file_id),
-                "faceId": data.get("faceId", doc.id),
-                "distance": round(dist, 6),
-                "score": round(max(0.0, 1.0 - dist), 6),
-                "webViewLink": data.get("webViewLink")
-                or f"https://drive.google.com/file/d/{file_id}/view",
-                "downloadUrl": data.get("downloadUrl") or _public_download_url(file_id),
-                "previewUrl": data.get("previewUrl") or _public_preview_url(file_id),
-            }
-
-    matches = sorted(best_by_file.values(), key=lambda row: row["distance"])
-    if top_k > 0:
-        matches = matches[:top_k]
-    return _json_response(
-        {
-            "queryFaceCount": len(query_faces),
-            "indexedFaceCountScanned": scanned,
-            "matchCount": len(matches),
-            "matches": matches,
-        }
-    )
+        print(f"search failed unexpectedly: {exc}")
+        return _json_response(
+            {
+                "error": (
+                    "Search backend is temporarily unavailable. "
+                    "Please try again in a few seconds."
+                )
+            },
+            status=503,
+        )
 
 
-@https_fn.on_request(timeout_sec=540)
+@https_fn.on_request(timeout_sec=540, memory=MemoryOption.GB_2)
 def download_matches_zip(req: https_fn.Request) -> https_fn.Response:
     if req.method == "OPTIONS":
         return _options_response()
@@ -719,7 +824,17 @@ def download_matches_zip(req: https_fn.Request) -> https_fn.Response:
         file_id = str(item).strip()
         if file_id and file_id not in unique_file_ids:
             unique_file_ids.append(file_id)
-    unique_file_ids = unique_file_ids[:200]
+    max_files = max(1, min(int(DOWNLOAD_MAX_FILES_PER_ZIP), 200))
+    if len(unique_file_ids) > max_files:
+        return _json_response(
+            {
+                "error": (
+                    f"Too many files selected ({len(unique_file_ids)}). "
+                    f"Please select at most {max_files} files per zip."
+                )
+            },
+            status=400,
+        )
 
     zip_name = _safe_filename(str(payload.get("zipName") or "face-matches"))
     zip_bytes = io.BytesIO()

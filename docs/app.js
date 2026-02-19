@@ -6,6 +6,9 @@ const SEARCH_TOP_K = 0; // 0 means return all matches
 const SEARCH_MAX_DISTANCE = 0.35;
 const SEARCH_REQUEST_RETRIES = 5;
 const SEARCH_REQUEST_TIMEOUT_MS = 120000;
+const DOWNLOAD_BATCH_SIZE = 60;
+const DOWNLOAD_REQUEST_RETRIES = 3;
+const DOWNLOAD_REQUEST_TIMEOUT_MS = 420000;
 
 const state = {
   matches: [],
@@ -550,38 +553,70 @@ async function onDownloadSelected() {
   }
 
   els.downloadSelectedBtn.disabled = true;
-  els.searchMeta.textContent = `Preparing zip for ${fileIds.length} file(s)...`;
+  els.selectAllBtn.disabled = true;
+  const batchSize = clampInt(DOWNLOAD_BATCH_SIZE, 1, 80, 60);
+  const batches = chunkArray(fileIds, batchSize);
+  const totalFiles = fileIds.length;
+  let totalErrCount = 0;
 
   try {
-    const response = await fetch(fnUrl("download_matches_zip"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        fileIds,
-        zipName: `face-matches-${Date.now()}`,
-      }),
-    });
+    for (let i = 0; i < batches.length; i += 1) {
+      const batch = batches[i];
+      const part = i + 1;
+      const partLabel = `${part}/${batches.length}`;
+      els.searchMeta.textContent = `Preparing zip ${partLabel} (${batch.length} file(s))...`;
 
-    if (!response.ok) {
-      const txt = await response.text();
-      throw new Error(txt || `HTTP ${response.status}`);
+      const response = await postBlobWithRetry(
+        fnUrl("download_matches_zip"),
+        {
+          fileIds: batch,
+          zipName: `face-matches-part-${String(part).padStart(2, "0")}-of-${String(
+            batches.length
+          ).padStart(2, "0")}-${Date.now()}`,
+        },
+        {
+          retries: DOWNLOAD_REQUEST_RETRIES,
+          timeoutMs: DOWNLOAD_REQUEST_TIMEOUT_MS,
+        }
+      );
+
+      const blob = await response.blob();
+      const fallbackName =
+        batches.length > 1
+          ? `face-matches-part-${String(part).padStart(2, "0")}-of-${String(
+              batches.length
+            ).padStart(2, "0")}.zip`
+          : `face-matches-${Date.now()}.zip`;
+      const filename =
+        getFilenameFromDisposition(response.headers.get("content-disposition")) || fallbackName;
+      downloadBlob(blob, filename);
+
+      const errCount = Number(response.headers.get("x-download-error-count") || 0);
+      if (Number.isFinite(errCount) && errCount > 0) {
+        totalErrCount += errCount;
+      }
+
+      // Prevent burst download throttling in some browsers.
+      if (part < batches.length) {
+        await sleep(500);
+      }
     }
 
-    const blob = await response.blob();
-    const filename =
-      getFilenameFromDisposition(response.headers.get("content-disposition")) ||
-      `face-matches-${Date.now()}.zip`;
-    downloadBlob(blob, filename);
-
-    const errCount = Number(response.headers.get("x-download-error-count") || 0);
-    if (errCount > 0) {
-      els.searchMeta.textContent = `Downloaded with ${errCount} file error(s).`;
+    if (totalErrCount > 0) {
+      els.searchMeta.textContent =
+        batches.length > 1
+          ? `Downloaded ${batches.length} zip files for ${totalFiles} selected image(s) with ${totalErrCount} file error(s).`
+          : `ZIP downloaded with ${totalErrCount} file error(s).`;
     } else {
-      els.searchMeta.textContent = "ZIP downloaded.";
+      els.searchMeta.textContent =
+        batches.length > 1
+          ? `Downloaded ${batches.length} zip files for ${totalFiles} selected image(s).`
+          : "ZIP downloaded.";
     }
   } catch (err) {
     els.searchMeta.textContent = `ZIP download failed: ${errorText(err)}`;
   } finally {
+    els.selectAllBtn.disabled = false;
     els.downloadSelectedBtn.disabled = false;
   }
 }
@@ -629,6 +664,54 @@ async function postJson(url, payload, options = {}) {
       throw new Error(data.error || data.raw || `HTTP ${response.status}`);
     }
     return data;
+  }
+}
+
+async function postBlobWithRetry(url, payload, options = {}) {
+  const retries = clampInt(options.retries ?? 0, 0, 5, 0);
+  const timeoutMs = clampInt(options.timeoutMs ?? 60000, 5000, 540000, 60000);
+  let attempt = 0;
+
+  while (true) {
+    let response;
+    try {
+      response = await fetchWithTimeout(
+        url,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+        timeoutMs
+      );
+    } catch (err) {
+      if (attempt < retries && isRetryableFetchError(err)) {
+        attempt += 1;
+        await sleep(backoffDelayMs(attempt));
+        continue;
+      }
+      throw err;
+    }
+
+    if (!response.ok) {
+      const text = await response.text();
+      let message = text || `HTTP ${response.status}`;
+      try {
+        const data = text ? JSON.parse(text) : {};
+        message = data.error || data.raw || message;
+      } catch {
+        // Keep raw text fallback.
+      }
+
+      if (attempt < retries && isRetryableHttpStatus(response.status)) {
+        attempt += 1;
+        await sleep(backoffDelayMs(attempt));
+        continue;
+      }
+      throw new Error(message);
+    }
+
+    return response;
   }
 }
 
@@ -693,6 +776,14 @@ function clampInt(raw, min, max, fallback) {
 
 function getResultCheckboxes() {
   return Array.from(els.results.querySelectorAll('input[type="checkbox"][data-file-id]'));
+}
+
+function chunkArray(items, chunkSize) {
+  const out = [];
+  for (let i = 0; i < items.length; i += chunkSize) {
+    out.push(items.slice(i, i + chunkSize));
+  }
+  return out;
 }
 
 function updateSelectionControls() {
