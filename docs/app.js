@@ -23,6 +23,7 @@ const els = {
   searchBtn: document.getElementById("searchBtn"),
   searchMeta: document.getElementById("searchMeta"),
   results: document.getElementById("results"),
+  selectAllBtn: document.getElementById("selectAllBtn"),
   downloadSelectedBtn: document.getElementById("downloadSelectedBtn"),
   cameraModal: document.getElementById("cameraModal"),
   closeCameraBtn: document.getElementById("closeCameraBtn"),
@@ -45,7 +46,9 @@ function init() {
   els.openCameraBtn.addEventListener("click", onOpenCameraModal);
   els.clearPhotoBtn.addEventListener("click", clearQuerySource);
   els.searchBtn.addEventListener("click", onSearch);
+  els.selectAllBtn.addEventListener("click", onToggleSelectAll);
   els.downloadSelectedBtn.addEventListener("click", onDownloadSelected);
+  els.results.addEventListener("change", onResultsSelectionChanged);
 
   els.closeCameraBtn.addEventListener("click", closeCameraModal);
   els.capturePhotoBtn.addEventListener("click", capturePhoto);
@@ -247,6 +250,8 @@ async function onSearch() {
   els.searchBtn.disabled = true;
   els.results.innerHTML = "";
   state.matches = [];
+  els.selectAllBtn.textContent = "Select All";
+  els.selectAllBtn.disabled = true;
   els.downloadSelectedBtn.disabled = true;
 
   try {
@@ -263,7 +268,6 @@ async function onSearch() {
     }`;
 
     renderResults(state.matches);
-    els.downloadSelectedBtn.disabled = state.matches.length === 0;
   } catch (err) {
     els.searchMeta.textContent = `Search failed: ${errorText(err)}`;
   } finally {
@@ -275,6 +279,7 @@ function renderResults(matches) {
   els.results.innerHTML = "";
   if (!matches.length) {
     els.results.innerHTML = `<p class="status-line">No matches found.</p>`;
+    updateSelectionControls();
     return;
   }
 
@@ -302,6 +307,24 @@ function renderResults(matches) {
     frag.appendChild(card);
   }
   els.results.appendChild(frag);
+  updateSelectionControls();
+}
+
+function onResultsSelectionChanged(ev) {
+  const target = ev.target;
+  if (!(target instanceof HTMLInputElement)) return;
+  if (!target.matches('input[type="checkbox"][data-file-id]')) return;
+  updateSelectionControls();
+}
+
+function onToggleSelectAll() {
+  const boxes = getResultCheckboxes();
+  if (!boxes.length) return;
+  const shouldSelect = boxes.some((box) => !box.checked);
+  for (const box of boxes) {
+    box.checked = shouldSelect;
+  }
+  updateSelectionControls();
 }
 
 async function onDownloadSelected() {
@@ -424,6 +447,26 @@ function clampInt(raw, min, max, fallback) {
   const n = Number.parseInt(raw, 10);
   if (Number.isNaN(n)) return fallback;
   return Math.min(max, Math.max(min, n));
+}
+
+function getResultCheckboxes() {
+  return Array.from(els.results.querySelectorAll('input[type="checkbox"][data-file-id]'));
+}
+
+function updateSelectionControls() {
+  const boxes = getResultCheckboxes();
+  if (!boxes.length) {
+    els.selectAllBtn.disabled = true;
+    els.selectAllBtn.textContent = "Select All";
+    els.downloadSelectedBtn.disabled = true;
+    return;
+  }
+
+  const checkedCount = boxes.filter((box) => box.checked).length;
+  const allSelected = checkedCount === boxes.length;
+  els.selectAllBtn.disabled = false;
+  els.selectAllBtn.textContent = allSelected ? "Unselect All" : "Select All";
+  els.downloadSelectedBtn.disabled = checkedCount === 0;
 }
 
 function sleep(ms) {
