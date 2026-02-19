@@ -354,6 +354,10 @@ code {
   background: #faefde;
 }
 
+.query-preview.mirrored {
+  transform: scaleX(-1);
+}
+
 .log {
   margin: 0.85rem 0 0;
   background: #f8f4eb;
@@ -527,6 +531,7 @@ code {
   display: block;
   aspect-ratio: 4 / 3;
   object-fit: cover;
+  transform: scaleX(-1);
 }
 
 #cameraPreview {
@@ -535,6 +540,7 @@ code {
   aspect-ratio: 4 / 3;
   object-fit: cover;
   background: #0f1620;
+  transform: scaleX(-1);
 }
 
 .camera-overlay {

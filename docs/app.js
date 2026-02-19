@@ -107,12 +107,15 @@ function showPreviewFromFile(file) {
   clearQueryPreview();
   state.previewObjectUrl = URL.createObjectURL(file);
   els.queryPreview.src = state.previewObjectUrl;
+  els.queryPreview.classList.remove("mirrored");
   els.queryPreview.classList.remove("hidden");
 }
 
-function showPreviewFromDataUrl(dataUrl) {
+function showPreviewFromDataUrl(dataUrl, options = {}) {
+  const mirrored = Boolean(options.mirrored);
   clearQueryPreview();
   els.queryPreview.src = dataUrl;
+  els.queryPreview.classList.toggle("mirrored", mirrored);
   els.queryPreview.classList.remove("hidden");
 }
 
@@ -122,6 +125,7 @@ function clearQueryPreview() {
     state.previewObjectUrl = "";
   }
   els.queryPreview.src = "";
+  els.queryPreview.classList.remove("mirrored");
   els.queryPreview.classList.add("hidden");
 }
 
@@ -222,7 +226,7 @@ function useCapturedPhoto() {
   els.queryImageInput.value = "";
   const split = state.capturedDraftDataUrl.split(",", 2);
   state.capturedImageBase64 = split.length === 2 ? split[1] : "";
-  showPreviewFromDataUrl(state.capturedDraftDataUrl);
+  showPreviewFromDataUrl(state.capturedDraftDataUrl, { mirrored: true });
   els.querySourceMeta.textContent = "Using camera capture.";
   closeCameraModal();
 }
